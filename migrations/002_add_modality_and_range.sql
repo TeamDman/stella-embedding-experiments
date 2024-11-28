@@ -1,0 +1,3 @@
+ALTER TABLE documents
+ADD COLUMN modality TEXT DEFAULT 'text',
+ADD COLUMN range JSONB,
