@@ -1,5 +1,11 @@
+import os
+os.environ["XFORMERS_FORCE_DISABLE_TRITON"] = "1"
+from transformers import logging
+logging.set_verbosity_error()
+
 import sys
 import psycopg2
+from psycopg2.extras import Json  # Import Json adapter
 from sentence_transformers import SentenceTransformer
 
 # Database connection settings
@@ -12,21 +18,30 @@ DB_CONFIG = {
 }
 
 # Initialize the model
+print("Loading model, please be patient...")
 model = SentenceTransformer("dunzhang/stella_en_400M_v5", trust_remote_code=True).cuda()
 
-# Function to read the file and extract URLs
-def extract_urls(file_path):
+# Function to read the file and extract URLs with byte ranges
+def extract_urls_with_ranges(file_path):
     urls = []
-    with open(file_path, "r", encoding="utf-8") as file:  # Specify UTF-8 encoding
+    ranges = []
+    current_pos = 0
+
+    with open(file_path, "r", encoding="utf-8") as file:
         for line in file:
+            line_length = len(line.encode("utf-8"))  # Ensure consistent byte length
             if "http" in line:  # Basic heuristic to detect URLs
                 url = line.strip()
+                start_pos = current_pos  # Byte position of the start
+                end_pos = current_pos + line_length  # Byte position of the end
                 urls.append(url)
-    return urls
+                ranges.append({"start": start_pos, "end": end_pos})  # JSON-friendly range
+            current_pos += line_length  # Update current position
 
+    return urls, ranges
 
 # Function to insert embeddings into the database
-def insert_embeddings(urls, source_uri):
+def insert_embeddings(urls, ranges, source_uri):
     try:
         # Generate embeddings
         embeddings = model.encode(urls).tolist()
@@ -37,13 +52,14 @@ def insert_embeddings(urls, source_uri):
 
         # Insert each embedding
         model_name = "dunzhang/stella_en_400M_v5"
-        for url, embedding in zip(urls, embeddings):
+        modality = "text"  # Set modality to text
+        for (url, embedding, byte_range) in zip(urls, embeddings, ranges):
             cursor.execute(
                 """
-                INSERT INTO documents (model, source_uri, embedding)
-                VALUES (%s, %s, %s)
+                INSERT INTO documents (model, modality, file, range, embedding)
+                VALUES (%s, %s, %s, %s::jsonb, %s)
                 """,
-                (model_name, source_uri, embedding),
+                (model_name, modality, source_uri, Json(byte_range), embedding),
             )
 
         # Commit the transaction
@@ -66,13 +82,12 @@ def main():
         sys.exit(1)
 
     file_path = sys.argv[1]
-    source_uri = f"file://{file_path}"  # Convert file path to URI
 
-    # Extract URLs and insert embeddings
-    urls = extract_urls(file_path)
+    # Extract URLs and byte ranges
+    urls, ranges = extract_urls_with_ranges(file_path)
     if urls:
         print(f"Found {len(urls)} URLs in the file. Processing...")
-        insert_embeddings(urls, source_uri)
+        insert_embeddings(urls, ranges, file_path)
     else:
         print("No URLs found in the file.")
 
