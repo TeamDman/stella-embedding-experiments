@@ -4,6 +4,7 @@ from transformers import logging
 logging.set_verbosity_error()
 import psycopg2
 from sentence_transformers import SentenceTransformer
+import json
 
 # Database connection settings
 DB_CONFIG = {
@@ -29,7 +30,7 @@ def get_top_results(prompt, top_n=5):
 
         # Query to calculate similarity and get the top results
         query = """
-        SELECT source_uri, embedding <-> %s::vector AS similarity
+        SELECT file, range::text, embedding <-> %s::vector AS similarity
         FROM documents
         ORDER BY similarity ASC
         LIMIT %s;
@@ -49,6 +50,37 @@ def get_top_results(prompt, top_n=5):
         if conn:
             conn.close()
 
+def read_file_segment(file_path, byte_range):
+    """
+    Reads a specific segment of a file based on a byte range.
+    Expands the range to capture complete lines.
+    """
+    start = byte_range["start"]
+    end = byte_range["end"]
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as file:
+            # Seek to start position
+            file.seek(start)
+
+            # Skip incomplete line at the start (if not at the beginning)
+            if start > 0:
+                file.readline()  # Move to the start of the next line
+
+            # Read until the end position
+            content = ""
+            while file.tell() < end:
+                line = file.readline()
+                if not line:  # End of file
+                    break
+                content += line
+
+            return content
+    except Exception as e:
+        print(f"Error reading file segment: {e}")
+        return "[Error reading file segment]"
+
+
 def main():
     print("Query System: Enter a prompt to get the top 5 results (type 'exit' to quit).")
 
@@ -63,9 +95,14 @@ def main():
         results = get_top_results(prompt)
         if results:
             print("\nTop Results:")
-            for rank, (source_uri, similarity) in enumerate(results, start=1):
-                print(f"{rank}. {source_uri} (similarity: {similarity:.4f})")
-            print()
+            for rank, (file_path, byte_range, similarity) in enumerate(results, start=1):
+                # Convert range from JSONB (Postgres) to Python dictionary
+                byte_range = json.loads(byte_range)  # Parse JSON string into a Python dict
+                content = read_file_segment(file_path, byte_range)
+
+                print(f"{rank}. File: {file_path}")
+                print(f"   Similarity: {similarity:.4f}")
+                print(f"   Content:\n{content.strip()}\n")
         else:
             print("No results found.\n")
 
